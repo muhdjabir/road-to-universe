@@ -27,15 +27,19 @@ func NewSessionService(repo repository.SessionRepository) SessionService {
 func (s *sessionService) CreateSession(ctx context.Context, userID string, req *model.CreateSessionRequest) (*model.TrainingSession, error) {
 	now := time.Now().UTC()
 	session := &model.TrainingSession{
-		ID:          uuid.New().String(),
-		UserID:      userID,
-		Title:       req.Title,
-		Description: req.Description,
-		Duration:    req.Duration,
-		ThrowCount:  req.ThrowCount,
-		SessionDate: req.SessionDate,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           uuid.New().String(),
+		UserID:       userID,
+		SessionType:  req.SessionType,
+		Duration:     req.Duration,
+		Intensity:    req.Intensity,
+		Location:     req.Location,
+		Weather:      req.Weather,
+		Notes:        req.Notes,
+		SessionDate:  req.SessionDate,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Throwing:     req.Throwing,
+		Conditioning: req.Conditioning,
 	}
 	if err := s.repo.Create(ctx, session); err != nil {
 		return nil, err
