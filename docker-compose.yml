@@ -34,6 +34,21 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  # ── Migrations (run with: make migrate-up) ────────────────────────────────────
+
+  migrate-training:
+    image: migrate/migrate:v4
+    profiles: [tools]
+    volumes:
+      - ./services/training/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/training_db?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ── Phase 2: Auth Service ──────────────────────────────────────────────────────
 
   # auth-service:

@@ -1,329 +1,331 @@
-# CLAUDE.md — Frisbee Training Platform
+# CLAUDE.md — Road to Niverse (Frisbee Training Platform)
 
-This file provides context for AI assistants (Claude and others) working in this codebase.
-Read this before making changes.
-
----
-
-## Project Overview
-
-A microservices-based ultimate frisbee training platform where athletes log sessions,
-track throwing volume, and view performance analytics.
-
-**Stack:** Go · Gin · PostgreSQL · Redis · RabbitMQ · Next.js · Kubernetes
+This file is the source of truth for AI agents working in this codebase.
+**Read this entire file before writing any code, creating files, or making changes.**
 
 ---
 
-## Repository Structure
+## What This Project Is
+
+A microservices platform for ultimate frisbee athletes to log training sessions,
+track throwing volume, and view performance analytics over time.
+
+**Stack:** Go · Gin · PostgreSQL · Redis · RabbitMQ · Next.js · Auth0 · Kubernetes
+
+---
+
+## Repository Layout
 
 ```
-frisbee-platform/
+road-to-niverse/
 ├── services/
-│   ├── auth-service/          # JWT auth (register, login)
-│   ├── training-service/      # Core service: sessions, outbox, event publishing
-│   ├── analytics-service/     # Consumes events, computes stats
-│   └── notification-worker/   # Consumes events, sends reminders
-├── gateway/                   # Nginx API gateway config
-├── frontend/                  # Next.js app
+│   ├── auth-service/          # User profile management (Auth0 is the identity provider)
+│   ├── training-service/      # Core service: log sessions, publish events via outbox
+│   ├── analytics-service/     # Consumes events, computes stats and trends
+│   └── notification-worker/   # Consumes events, sends reminders and summaries
+├── gateway/                   # Nginx config: JWT validation, routing, rate limiting
+├── frontend/                  # Next.js app (TanStack Query for data fetching)
 ├── infra/
 │   ├── k8s/                   # Kubernetes manifests
 │   ├── docker/                # Dockerfiles per service
 │   └── observability/         # Prometheus, Grafana, Loki, Jaeger configs
-├── proto/                     # Shared event schemas (if using protobuf)
 └── CLAUDE.md
 ```
 
-Each service is a **self-contained Go module** with its own `go.mod`.
+Each service is a **self-contained Go module** with its own `go.mod`. Do not share
+code between services via internal packages — duplicate small helpers if needed.
 
 ---
+
+## Authentication Architecture
+
+**Auth0 is the identity provider.** This system does not issue its own JWTs.
+
+### Login flow
+```
+1. User logs in via Auth0 (browser redirect)
+2. Auth0 redirects to POST /api/auth/callback with a short-lived code
+3. Auth service exchanges code → receives access token from Auth0
+4. Auth service sets an HttpOnly cookie on the response:
+     Set-Cookie: access_token=<jwt>; HttpOnly; Secure; SameSite=Strict; Path=/
+5. Browser stores cookie — frontend JS never reads the token directly
+6. Every subsequent request: browser sends cookie automatically
+```
+
+### JWT validation flow
+```
+1. Request arrives at gateway with cookie
+2. Gateway extracts JWT from the access_token cookie
+3. Gateway validates JWT locally using Auth0's cached JWKS public key
+     JWKS endpoint: https://<tenant>.auth0.com/.well-known/jwks.json
+4. No network call to auth service — validation is a local crypto operation
+5. Gateway extracts user identity and forwards as internal headers:
+     X-User-ID: auth0|abc123
+     X-User-Email: athlete@example.com
+6. Gateway routes request to the target service
+7. Target service also re-validates the JWT independently (defence in depth)
+```
+
+**The `sub` claim from the Auth0 JWT is the canonical `user_id` used across all
+services and in all events.**
+
+### Required env vars for JWT validation (every service)
+```
+AUTH0_DOMAIN=your-tenant.auth0.com
+AUTH0_AUDIENCE=https://api.road-to-niverse.com
+```
+
 
 ## Services
 
-### Auth Service (`/services/auth-service`)
-- `POST /register` — create user account
-- `POST /login` — returns signed JWT
-- Database: `users` table
-- No event publishing
+### Auth Service — `/services/auth-service`
 
-### Training Service (`/services/training-service`)
-- `POST /training` — log a session
-- `GET /training` — list sessions for authenticated user
-- `GET /training/:id` — get single session
-- `PUT /training/:id` — update session
-- `DELETE /training/:id` — soft delete (`deleted_at`)
-- Implements the **outbox pattern** — never publish to RabbitMQ directly
-- Background worker polls outbox and publishes events
+Responsibility: bridge between Auth0 and the platform's user profile data.
+Auth0 owns credentials. This service owns profile fields.
 
-### Analytics Service (`/services/analytics-service`)
-- RabbitMQ consumer only (no direct HTTP writes from training service)
-- `GET /analytics/weekly` — weekly throw volume
-- `GET /analytics/stats` — totals, streaks, throw type breakdown
-- Must be **idempotent** — duplicate events must not corrupt aggregates
 
-### Notification Worker (`/services/notification-worker`)
-- RabbitMQ consumer, no HTTP endpoints
-- Sends reminders when user hasn't trained in 3+ days
-- Sends weekly summaries
+**No event publishing from this service.**
 
----
+### Training Service — `/services/training-service`
 
-## Data Model
+Responsibility: log and manage training sessions. The only service that writes
+training data. Publishes events via the outbox pattern — never directly to RabbitMQ.
 
-### training-service — Current Schema (`001_initial.sql`)
+### Analytics Service — `/services/analytics-service`
 
-```sql
--- Core session record
-training_sessions (
-    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id          UUID NOT NULL,
-    session_type     VARCHAR(50) CHECK (IN 'team_training','throwing','gym','conditioning','scrimmage','other'),
-    duration_minutes INT  CHECK (> 0),
-    intensity        VARCHAR(10) CHECK (IN 'low','medium','high'),
-    location         VARCHAR(255),
-    weather          VARCHAR(100),
-    notes            TEXT,
-    session_date     DATE NOT NULL DEFAULT CURRENT_DATE,
-    created_at       TIMESTAMPTZ DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ DEFAULT NOW()
-)
+Responsibility: consume training events and compute aggregate stats.
+This service has its own database — never query it from other services.
 
--- Throwing stats (one row per session, UNIQUE constraint enforced)
-throwing_stats (
-    id            UUID PRIMARY KEY,
-    session_id    UUID REFERENCES training_sessions(id) ON DELETE CASCADE,
-    backhand_reps INT DEFAULT 0,
-    forehand_reps INT DEFAULT 0,
-    hammer_reps   INT DEFAULT 0,
-    scoober_reps  INT DEFAULT 0,
-    break_throws  INT DEFAULT 0,   -- break-mark throws
-    hucks         INT DEFAULT 0,   -- deep/long throws
-    turnovers     INT DEFAULT 0,
-    UNIQUE (session_id)
-)
+### Notification Worker — `/services/notification-worker`
 
--- Conditioning stats (one row per session, UNIQUE constraint enforced)
-conditioning_stats (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES training_sessions(id) ON DELETE CASCADE,
-    sprints         INT           DEFAULT 0,
-    distance_km     NUMERIC(6,2),
-    max_speed_kmh   NUMERIC(5,2),
-    heart_rate_avg  INT,
-    heart_rate_max  INT,
-    UNIQUE (session_id)
-)
-
--- Transactional outbox for reliable event publishing
-outbox_events (
-    id           UUID PRIMARY KEY,
-    event_type   VARCHAR(100) NOT NULL,
-    payload      JSONB        NOT NULL,
-    status       VARCHAR(20)  DEFAULT 'pending',  -- pending | published | failed
-    created_at   TIMESTAMPTZ  DEFAULT NOW(),
-    published_at TIMESTAMPTZ
-)
-```
-
-### Indexes
-```sql
-idx_training_sessions_user_id       ON training_sessions (user_id)
-idx_training_sessions_session_date  ON training_sessions (user_id, session_date DESC)
-idx_throwing_stats_session_id       ON throwing_stats (session_id)
-idx_conditioning_stats_session_id   ON conditioning_stats (session_id)
-```
-
-### Hard Deletes (no soft delete in V1)
-The current schema uses `ON DELETE CASCADE` — deleting a `training_session` removes its
-`throwing_stats` and `conditioning_stats` rows automatically. The training service publishes
-a `training.session.deleted` event before deletion so analytics can reverse aggregates.
-
-> **Note:** `deleted_at` soft-delete is planned but not yet in the schema. Do not add it
-> without a migration file.
-
-### Planned Migrations (not yet implemented)
-```
-002_add_offensive_stats.sql   -- cuts, assists, drops
-003_add_defensive_stats.sql   -- blocks, layout_blocks, forced_turnovers
-004_add_gym_exercises.sql     -- exercise, sets, reps, weight
-005_add_pull_stats.sql        -- pulls, pull_distance_avg
-```
-
----
+Responsibility: send timely reminders and summaries. No HTTP endpoints.
 
 ## Event Architecture
 
-### Outbox Pattern (training-service)
+### Outbox Pattern (training-service only)
+
+The outbox pattern guarantees events are never lost even if RabbitMQ is temporarily down.
+
 ```
-1. Begin transaction
-2. INSERT INTO training_sessions
-3. INSERT INTO outbox_events (status = 'pending')
-4. Commit transaction
-5. Background poller: SELECT unpublished → publish to RabbitMQ → mark published
+1.  Begin database transaction
+2.  INSERT INTO training_sessions (+ throwing_stats, conditioning_stats as needed)
+3.  INSERT INTO outbox_events (status = 'pending', payload = fat event JSON)
+4.  Commit transaction
+    — both the data and the intent to publish are now durable —
+5.  Background poller (runs every ~1s):
+      SELECT * FROM outbox_events WHERE status = 'pending' ORDER BY created_at
+6.  Publish each event to RabbitMQ
+7.  UPDATE outbox_events SET status = 'published', published_at = NOW()
 ```
 
-**Never publish to RabbitMQ inside the HTTP request handler.**
+**Never publish to RabbitMQ inside an HTTP request handler or inside a transaction.**
 
 ### Event: `training.session.created`
 ```json
 {
-  "event_id": "uuid",
-  "event_type": "training.session.created",
-  "user_id": "uuid",
-  "session_id": "uuid",
-  "occurred_at": "RFC3339",
+  "event_id":    "uuid",
+  "event_type":  "training.session.created",
+  "user_id":     "auth0|abc123",
+  "session_id":  "uuid",
+  "occurred_at": "2026-03-08T18:00:00Z",
   "payload": {
-    "date": "YYYY-MM-DD",
-    "session_type": "drilling|scrimmage|conditioning|team_practice|solo",
+    "session_date":     "2026-03-08",
+    "session_type":     "throwing",
     "duration_minutes": 90,
-    "intensity": "low|medium|high",
-    "throws": {
-      "backhand": 80,
-      "forehand": 60,
-      "hammer": 20,
-      "total": 160,
-      "completion_rate": 0.94
+    "intensity":        "high",
+    "throwing": {
+      "backhand_reps": 80,
+      "forehand_reps": 60,
+      "hammer_reps":   20,
+      "scoober_reps":  5,
+      "break_throws":  15,
+      "hucks":         10,
+      "turnovers":     3
     },
     "conditioning": {
-      "rpe": 8,
-      "distance_km": 4.2,
-      "sprint_count": 30
-    },
-    "role": "handler|cutter|hybrid"
+      "sprints":        20,
+      "distance_km":    4.2,
+      "max_speed_kmh":  24.5,
+      "heart_rate_avg": 155,
+      "heart_rate_max": 182
+    }
   }
 }
 ```
 
 ### Event: `training.session.deleted`
-Carries `session_id` and `user_id` only. Analytics service must reverse aggregates.
+```json
+{
+  "event_id":    "uuid",
+  "event_type":  "training.session.deleted",
+  "user_id":     "auth0|abc123",
+  "session_id":  "uuid",
+  "occurred_at": "2026-03-08T18:05:00Z"
+}
+```
+
+Analytics must reverse any aggregates built from the matching `training.session.created`
+event. Events are fat — payloads must be self-contained so consumers never call back.
 
 ---
 
 ## API Gateway (Nginx)
 
-Routes:
-- `/api/auth/*` → auth-service:8081
-- `/api/training/*` → training-service:8082
-- `/api/analytics/*` → analytics-service:8083
+The gateway is the **only external entry point**. Services refuse direct external traffic
+via Kubernetes NetworkPolicy — only pods labelled `app: api-gateway` can reach them.
 
-Rate limits (Redis-backed):
-- `POST /api/auth/login` → 5 req/min
-- `POST /api/training` → 30 req/min
+**Routing:**
+```
+/api/auth/*       → auth-service:8081
+/api/training/*   → training-service:8082
+/api/analytics/*  → analytics-service:8083
+```
 
-All routes except `/api/auth/register` and `/api/auth/login` require:
+**What the gateway does on every request:**
 ```
-Authorization: Bearer <jwt>
+1. Extract JWT from the access_token cookie
+2. Validate JWT against cached Auth0 JWKS (local crypto — no network call)
+3. Reject with 401 if token is missing or invalid
+   (exceptions: /api/auth/callback and /api/auth/logout pass through unauthenticated)
+4. Forward user identity to downstream service:
+     X-User-ID: auth0|abc123
+     X-User-Email: athlete@example.com
+5. Forward internal secret header:
+     X-Internal-Secret: <value from Kubernetes Secret>
+6. Route to target service
 ```
+
+**Rate limits (Redis-backed):**
+```
+POST /api/auth/callback  →  10 req/min
+POST /api/training       →  30 req/min
+```
+
+**Internal secret:** every downstream service rejects requests missing `X-Internal-Secret`.
+Value is injected via a Kubernetes Secret — never hardcoded.
 
 ---
 
-## Frontend (`/frontend`)
+## Frontend — `/frontend`
 
-**Framework:** Next.js with TanStack Query
+**Framework:** Next.js · TanStack Query
 
-Pages:
+- All server state goes through TanStack Query hooks — never `useEffect` for fetching
+- JWT lives in the HttpOnly cookie only — never read or store it in JavaScript
+- Credentials are included on every fetch: `fetch(url, { credentials: 'include' })`
+
+**Pages:**
 | Route | Description |
 |---|---|
-| `/login` | Auth form |
+| `/login` | Redirects to Auth0 Universal Login |
 | `/dashboard` | Weekly volume, sessions this month, throw counts |
-| `/training/new` | Log a new session form |
+| `/training/new` | Form to log a new session |
 | `/training/history` | Paginated session list |
 | `/analytics` | Charts: throw trends, conditioning load, streaks |
-
-Data fetching uses TanStack Query — all server state goes through query hooks,
-not component-level `useEffect` fetches.
 
 ---
 
 ## Observability
 
-### Metrics (Prometheus)
-Instrument every service with:
-- `http_request_duration_seconds` (histogram, labeled by route + status)
-- `http_requests_total` (counter)
-- `outbox_events_published_total`
-- `rabbitmq_messages_consumed_total`
-- `redis_rate_limit_hits_total`
-
-### Logging (zap + Loki)
-Use structured logging everywhere. No `fmt.Println`.
-
-```go
-logger.Info("session created",
-  zap.String("user_id", userID),
-  zap.String("session_id", sessionID),
-  zap.Int("throw_count", throws.Total),
-)
+### Metrics — Prometheus
+Every service exposes `/metrics`. Required instruments:
+```
+http_request_duration_seconds    histogram  labelled by route + status code
+http_requests_total              counter
+outbox_events_published_total    counter    training-service only
+rabbitmq_messages_consumed_total counter    analytics + notification services
+redis_rate_limit_hits_total      counter    gateway only
 ```
 
-Log levels: `DEBUG` locally, `INFO` in production.
+### Logging — zap → Loki
+Structured logs everywhere. `fmt.Println` is not allowed.
+```go
+logger.Info("session created",
+    zap.String("user_id", userID),
+    zap.String("session_id", sessionID),
+    zap.Int("duration_minutes", session.DurationMinutes),
+)
+```
+Log level: `DEBUG` locally · `INFO` in production.
+Never log the JWT value or cookie contents.
 
-### Tracing (OpenTelemetry + Jaeger)
-Propagate trace context across service boundaries and RabbitMQ messages.
-Every HTTP handler and RabbitMQ consumer should start/continue a span.
+### Tracing — OpenTelemetry → Jaeger
+Propagate trace context across all service boundaries including RabbitMQ message headers.
+Every HTTP handler and every RabbitMQ consumer must start or continue a span.
 
-Trace the full flow: `Frontend → Training Service → RabbitMQ → Analytics Service`
+Full trace path: `Frontend → Gateway → Training Service → RabbitMQ → Analytics Service`
 
 ---
 
 ## Kubernetes
 
-Deployments: `auth-service`, `training-service`, `analytics-service`, `notification-worker`
-StatefulSets: `postgres`, `redis`, `rabbitmq`
+| Resource | Kind |
+|---|---|
+| auth-service | Deployment |
+| training-service | Deployment |
+| analytics-service | Deployment |
+| notification-worker | Deployment |
+| postgres | StatefulSet |
+| redis | StatefulSet |
+| rabbitmq | StatefulSet |
 
-Each deployment requires:
-- `readinessProbe` on `/health`
-- `livenessProbe` on `/health`
-- Resource requests + limits set
-- Secrets via `Secret` objects (never hardcoded)
-- Config via `ConfigMap`
+Every Deployment requires:
+- `readinessProbe` and `livenessProbe` hitting `GET /health`
+- CPU and memory requests + limits defined
+- Secrets from `Secret` objects — never literal values in manifests
+- Config from `ConfigMap`
+- `NetworkPolicy` allowing ingress only from `app: api-gateway`
 
 ---
 
 ## Local Development
 
 ```bash
-# Start all infrastructure
+# Start infrastructure (postgres, redis, rabbitmq)
 docker compose up -d
 
-# Run a service locally
-cd services/training-service
-go run ./cmd/server
+# Run a single service
+cd services/training-service && go run ./cmd/server
 
 # Run all services
 docker compose --profile services up
 ```
 
-Environment variables are loaded from `.env` files per service.
-See `.env.example` in each service directory.
+Each service reads config from a `.env` file.
+Copy `.env.example` → `.env` and fill in values before running locally.
 
 ---
 
 ## Code Conventions
 
 ### Go
-- One package per responsibility (`handler`, `service`, `repository`, `worker`)
-- Errors wrapped with context: `fmt.Errorf("createSession: %w", err)`
-- No global state — inject dependencies via constructor
-- Repository interface defined in the service layer, not the repository layer
-- Table-driven tests for handlers and service logic
+- Package layout per service: `cmd/` · `handler/` · `service/` · `repository/` · `worker/`
+- Wrap errors with context: `fmt.Errorf("createSession: %w", err)`
+- No global state — inject all dependencies via constructor functions
+- Define repository interfaces in the `service` package, not `repository`
+- Use table-driven tests for handlers and service logic
+- Never call `time.Now()` directly — inject a `clock` interface for testability
 
 ### Database
 - Migrations managed with `golang-migrate`
-- Migration files in `services/<name>/migrations/`
-- Never modify existing migration files — add new ones
+- Migration files live in `services/<name>/migrations/`
+- **Never edit an existing migration file** — always add a new numbered file
 
 ### Git
-- Branch naming: `feat/`, `fix/`, `infra/`, `docs/`
+- Branch prefixes: `feat/` · `fix/` · `infra/` · `docs/`
 - Commit format: `feat(training): add outbox poller`
-- PRs require passing tests and lint (`golangci-lint`)
+- PRs must pass tests and `golangci-lint` before merge
 
 ---
 
-## Common Pitfalls
+## Common Pitfalls — Read Before Coding
 
-- **Don't publish events inside a transaction** — use the outbox poller
-- **Don't query analytics DB from training service** — services own their data
-- **Don't use `time.Now()` directly in tests** — inject a clock interface
-- **Don't forget idempotency keys** — analytics consumers must handle redelivery
-- **Soft deletes only** — `deleted_at` not `DELETE FROM`
-- **Fat events** — include enough payload so consumers don't need to call back
+- **Never publish to RabbitMQ inside a request handler** — always use the outbox poller
+- **Never publish inside a database transaction** — the outbox row is the durable record; the poller publishes after commit
+- **Delete flow order matters** — write `training.session.deleted` to outbox first, then `DELETE FROM training_sessions`; cascade handles child rows
+- **Analytics must be idempotent** — use `event_id` as a deduplication key; the same event arriving twice must not double-count
+- **Services own their own data** — never query another service's database directly
+- **No soft deletes in V1** — schema uses `ON DELETE CASCADE`; do not add `deleted_at` without a migration file
+- **Fat events only** — payloads must be self-contained; consumers must never call back to fetch missing fields
+- **Auth0 sub is the user_id everywhere** — in DB rows, event payloads, log fields, and internal headers
+- **Never log the JWT or cookie value** — strip from access logs at the gateway level

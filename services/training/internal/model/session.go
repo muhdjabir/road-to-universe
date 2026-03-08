@@ -16,6 +16,7 @@ type TrainingSession struct {
 	SessionDate  time.Time  `db:"session_date"     json:"session_date"`
 	CreatedAt    time.Time  `db:"created_at"       json:"created_at"`
 	UpdatedAt    time.Time  `db:"updated_at"       json:"updated_at"`
+	DeletedAt    *time.Time `db:"deleted_at"       json:"-"`
 
 	// Populated on GET — not stored in training_sessions table
 	Throwing     *ThrowingStats     `db:"-" json:"throwing,omitempty"`
@@ -58,6 +59,18 @@ type CreateSessionRequest struct {
 	Weather      string             `json:"weather"`
 	Notes        string             `json:"notes"`
 	SessionDate  time.Time          `json:"session_date"     binding:"required"`
+	Throwing     *ThrowingStats     `json:"throwing"`
+	Conditioning *ConditioningStats `json:"conditioning"`
+}
+
+type UpdateSessionRequest struct {
+	SessionType  string             `json:"session_type"     binding:"omitempty,oneof=team_training throwing gym conditioning scrimmage other"`
+	Duration     int                `json:"duration_minutes" binding:"omitempty,min=1"`
+	Intensity    string             `json:"intensity"        binding:"omitempty,oneof=low medium high"`
+	Location     string             `json:"location"`
+	Weather      string             `json:"weather"`
+	Notes        string             `json:"notes"`
+	SessionDate  *time.Time         `json:"session_date"`
 	Throwing     *ThrowingStats     `json:"throwing"`
 	Conditioning *ConditioningStats `json:"conditioning"`
 }

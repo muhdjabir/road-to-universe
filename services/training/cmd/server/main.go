@@ -1,33 +1,39 @@
 package main
 
 import (
-	"log"
-
 	"github.com/muhdjabir/road-to-universe/services/training/internal/config"
 	"github.com/muhdjabir/road-to-universe/services/training/internal/db"
 	"github.com/muhdjabir/road-to-universe/services/training/internal/handler"
+	"github.com/muhdjabir/road-to-universe/services/training/internal/logger"
 	"github.com/muhdjabir/road-to-universe/services/training/internal/repository"
 	"github.com/muhdjabir/road-to-universe/services/training/internal/service"
+	"go.uber.org/zap"
 )
 
 func main() {
 	cfg := config.Load()
 
+	log, err := logger.New(cfg.Env)
+	if err != nil {
+		panic("failed to initialise logger: " + err.Error())
+	}
+	defer log.Sync() //nolint:errcheck
+
 	database, err := db.Connect(cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		log.Fatal("failed to connect to database", zap.Error(err))
 	}
 	defer database.Close()
-	log.Println("connected to database")
+	log.Info("connected to database")
 
 	sessionRepo := repository.NewSessionRepository(database)
-	sessionSvc := service.NewSessionService(sessionRepo)
-	sessionHandler := handler.NewSessionHandler(sessionSvc)
+	sessionSvc := service.NewSessionService(sessionRepo, log)
+	sessionHandler := handler.NewSessionHandler(sessionSvc, log)
 
-	router := handler.SetupRouter(sessionHandler)
+	router := handler.SetupRouter(sessionHandler, log)
 
-	log.Printf("training service starting on :%s", cfg.Port)
+	log.Info("training service starting", zap.String("port", cfg.Port), zap.String("env", cfg.Env))
 	if err := router.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("failed to start server: %v", err)
+		log.Fatal("server failed", zap.Error(err))
 	}
 }

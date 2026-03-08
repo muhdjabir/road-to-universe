@@ -1,6 +1,7 @@
 SERVICES := training auth analytics notification
 
-.PHONY: help init up down build logs migrate-training
+.PHONY: help init up down build logs training-logs \
+        migrate-up migrate-down migrate-version migrate-create psql
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -33,11 +34,32 @@ logs: ## Tail logs from all active services
 training-logs: ## Tail training service logs
 	docker compose logs -f training-service
 
-# ── Database ───────────────────────────────────────────────────────────────────
+# ── Migrations ─────────────────────────────────────────────────────────────────
 
-migrate-training: ## Apply training service migration (requires running postgres)
-	docker compose exec -T postgres psql -U postgres -d training_db \
-		< services/training/migrations/001_create_training_sessions.sql
+migrate-up: ## Apply all pending training migrations
+	docker compose run --rm migrate-training
+
+migrate-down: ## Roll back the last training migration
+	docker compose run --rm migrate-training \
+		-path=/migrations \
+		-database="postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/training_db?sslmode=disable" \
+		down 1
+
+migrate-version: ## Show current training migration version
+	docker compose run --rm migrate-training \
+		-path=/migrations \
+		-database="postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/training_db?sslmode=disable" \
+		version
+
+migrate-create: ## Create a new migration pair: make migrate-create name=add_something
+	@[ -n "$(name)" ] || (echo "Usage: make migrate-create name=<description>"; exit 1)
+	@seq=$$(ls services/training/migrations/*.up.sql 2>/dev/null | wc -l | tr -d ' '); \
+	 seq=$$(printf "%06d" $$((seq + 1))); \
+	 touch services/training/migrations/$${seq}_$(name).up.sql; \
+	 touch services/training/migrations/$${seq}_$(name).down.sql; \
+	 echo "Created: $${seq}_$(name).up.sql / .down.sql"
+
+# ── Database ───────────────────────────────────────────────────────────────────
 
 psql: ## Open psql shell in training_db
 	docker compose exec postgres psql -U postgres -d training_db
